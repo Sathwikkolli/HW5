@@ -26,6 +26,7 @@ white digit on black background (MNIST convention).
 ("code", """
 import os
 import pickle
+import warnings
 import numpy as np
 import matplotlib.pyplot as plt
 from PIL import Image
@@ -35,7 +36,8 @@ class Mnist:
     """Forward propagation (inference) for the pre-trained MNIST network."""
 
     def __init__(self, model_file="mnist/sample_weight.pkl"):
-        with open(model_file, "rb") as f:
+        with open(model_file, "rb") as f, warnings.catch_warnings():
+            warnings.simplefilter("ignore")   # old pickle triggers a harmless NumPy deprecation warning
             self.network = pickle.load(f)
 
     # --- activation functions
@@ -120,9 +122,12 @@ rps = nb([
 4. Put a new image in `test_images/` (e.g. `test_images/test_1.png`) and run the last cell.
 """),
 ("code", """
+import warnings
 import numpy as np
 import matplotlib.pyplot as plt
 from PIL import Image, ImageOps
+
+warnings.filterwarnings("ignore")
 
 MODEL_FILE = "model/keras_model.h5"
 LABELS_FILE = "model/labels.txt"
