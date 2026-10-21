@@ -116,8 +116,8 @@ rps = nb([
 **Setup (one time)**
 1. Train an *Image Project* with 3 classes (Rock, Paper, Scissors) at https://teachablemachine.withgoogle.com/
 2. *Export Model -> Tensorflow -> Keras -> Download my model*. Unzip; put `keras_model.h5` and `labels.txt` in `model/`.
-3. `pip install tensorflow pillow numpy matplotlib` (if loading fails on newer TensorFlow also `pip install tf_keras`; handled below).
-4. Put a new image in `test_images/` (e.g. `test_images/rock.jpg`) and run the last cell.
+3. `pip install tensorflow h5py pillow numpy matplotlib` (the loader below works around a Keras 3 incompatibility with Teachable Machine files).
+4. Put a new image in `test_images/` (e.g. `test_images/test_1.png`) and run the last cell.
 """),
 ("code", """
 import numpy as np
@@ -128,22 +128,55 @@ MODEL_FILE = "model/keras_model.h5"
 LABELS_FILE = "model/labels.txt"
 """),
 ("code", """
-def load_model(path):
-    try:
-        import tensorflow as tf
-        return tf.keras.models.load_model(path, compile=False)
-    except Exception as e:      # Keras 3 can't read some Teachable Machine layers
-        print("tf.keras failed (", type(e).__name__, ") - retrying with tf_keras")
-        import tf_keras
-        return tf_keras.models.load_model(path, compile=False)
+import json
+import h5py
+import tensorflow as tf
 
-model = load_model(MODEL_FILE)
+class DepthwiseConv2D(tf.keras.layers.DepthwiseConv2D):
+    def __init__(self, *a, **k):
+        k.pop("groups", None); super().__init__(*a, **k)
+
+def _key(layer, v):
+    n = v.path.split("/")[-1]
+    if isinstance(layer, tf.keras.layers.DepthwiseConv2D) and n == "kernel":
+        n = "depthwise_kernel"
+    return n + ":0"
+
+def _first(t):
+    return t[0] if isinstance(t, (list, tuple)) else t
+
+def load_tm_model(path):
+    # Rebuilds the Teachable Machine model (MobileNetV2 backbone + 2 dense layers) and copies the weights
+    # from keras_model.h5. Keras 3 cannot open these .h5 files directly.
+    with h5py.File(path, "r") as f:
+        cfg = json.loads(f.attrs["model_config"])
+        seqs = {l["config"]["name"]: l["config"]["layers"] for l in cfg["config"]["layers"] if l["class_name"] == "Sequential"}
+        backbone = tf.keras.Model.from_config(
+            [l for l in seqs["sequential_1"] if l["class_name"] in ("Functional", "Model")][0]["config"],
+            custom_objects={"DepthwiseConv2D": DepthwiseConv2D})
+        w = f["model_weights"]
+        for layer in backbone.layers:
+            if layer.weights:
+                g = w["sequential_1"][layer.name]
+                layer.set_weights([np.asarray(g[_key(layer, v)]) for v in layer.weights])
+        x = tf.keras.layers.GlobalAveragePooling2D()(_first(backbone.output))
+        for l in seqs["sequential_3"]:
+            if l["class_name"] != "Dense":
+                continue
+            c = l["config"]
+            dense = tf.keras.layers.Dense(c["units"], activation=c["activation"], use_bias=c["use_bias"], name=c["name"])
+            x = dense(x)
+            g = w["sequential_3"][c["name"]]
+            dense.set_weights([np.asarray(g[v.path.split("/")[-1] + ":0"]) for v in dense.weights])
+    return tf.keras.Model(_first(backbone.input), x)
+
+model = load_tm_model(MODEL_FILE)
 
 # labels.txt lines look like "0 Rock" -> keep the name only
 with open(LABELS_FILE) as f:
     class_names = [line.strip().split(" ", 1)[1] for line in f if line.strip()]
 print(class_names)
-model.summary()
+print("input:", model.input_shape, "output:", model.output_shape)
 """),
 ("markdown", """
 ## Inference (forward propagation)
@@ -168,7 +201,14 @@ def classify(path):
     print("Prediction:", class_names[k])
     return class_names[k]
 
-classify("test_images/rock.jpg")     # change to your new image
+classify("test_images/test_1.png")     # change to your new image
+"""),
+("markdown", "## All held-out test images"),
+("code", """
+import glob
+for f in sorted(glob.glob("test_images/*.png") + glob.glob("test_images/*.jpg")):
+    print(f)
+    classify(f)
 """),
 ])
 
